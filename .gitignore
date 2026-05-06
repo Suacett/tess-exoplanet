@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environment — installed locally, not part of the project
+venv/
+.venv/
+env/
+
+# Backups
+*.bak
+*.orig
+
+# Environment variables — never commit real .env
+.env
+.env.local
+
+# ── TESS data & runtime outputs ───────────────────────────────────────────────
+# All generated at runtime; too large and change too often to track in git
+data/
+logs/
+results/
+plots/
+figures/
+
+# TESS light curve files
+*.fits
+*.fits.gz
+lightkurve-cache/
+tesscut/
+
+# Generated HTML reports
+calibration_report.html
+*.html
+
+# ── ML / model artifacts ──────────────────────────────────────────────────────
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.pt
+*.pth
+checkpoints/
+
+# ── ExoMiner++ runtime clone ──────────────────────────────────────────────────
+# NASA's model repo — cloned at setup time, not redistributed here
+# Attribution: https://github.com/nasa/ExoMiner  (NASA Open Source Agreement)
+ExoMiner/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+# Block autosave checkpoints but keep notebooks themselves trackable
+.ipynb_checkpoints/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
