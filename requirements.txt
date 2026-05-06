@@ -1,0 +1,47 @@
+# TESS Exoplanet Transit Search Pipeline — Python dependencies
+# Python 3.12 required
+# Install: pip install -r requirements.txt
+
+# ── Core science stack ────────────────────────────────────────────────────────
+lightkurve==2.5.1          # TESS/Kepler light curve download and BLS search
+astropy==7.2.0             # FITS I/O, units, time handling
+astroquery==0.4.11         # MAST archive queries
+numpy==2.4.3
+pandas==2.3.3
+scipy==1.17.1
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib==3.10.8
+plotly==6.6.0
+seaborn==0.13.2
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+streamlit==1.55.0
+
+# ── Transit analysis ──────────────────────────────────────────────────────────
+transitleastsquares==1.32  # TLS period search (alternative to BLS)
+wotan==1.10                # Light curve detrending / flattening
+batman-package==2.5.3      # Analytic transit model for verification
+
+# ── Performance ───────────────────────────────────────────────────────────────
+numba==0.64.0              # JIT compilation used by TLS and lightkurve internals
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+requests==2.32.5
+rich==14.3.3               # Terminal progress bars and formatted output
+psutil==7.2.2              # CPU/memory monitoring during scans
+tqdm==4.67.3
+h5py==3.16.0               # HDF5 I/O for cached light curves
+scikit-learn==1.8.0
+
+# ── Jupyter (optional — for notebooks/ only) ──────────────────────────────────
+jupyterlab==4.5.6
+ipywidgets==8.1.8
+jupytext==1.19.1
+
+# ── ExoMiner++ / PyTorch ──────────────────────────────────────────────────────
+# ExoMiner++ runs via Podman (see EXOMINER_HOWTO.md) — PyTorch is NOT needed
+# in this Python environment. If you want to run ExoMiner++ without Podman,
+# install PyTorch separately:
+#
+#   pip install torch==2.10.0+cpu --index-url https://download.pytorch.org/whl/cpu
