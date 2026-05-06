@@ -9,7 +9,7 @@ It downloads TESS light curves from NASA MAST, runs a Box Least Squares (BLS) pe
 ## Screenshot
 
 <!-- TODO: Add Streamlit dashboard screenshot -->
-> *Screenshot coming soon — run `streamlit run dashboard.py` to see the live pipeline dashboard.*
+> *Screenshot coming soon — run `streamlit run scripts/dashboard.py` to see the live pipeline dashboard.*
 
 ---
 
@@ -17,59 +17,40 @@ It downloads TESS light curves from NASA MAST, runs a Box Least Squares (BLS) pe
 
 ### Requirements
 - Python 3.12
-- [Podman](https://podman.io/docs/installation) — for ExoMiner++ scoring (Docker works too with minor flag changes)
+- [Podman](https://podman.io/docs/installation) — for ExoMiner++ scoring
 - ~10 GB free disk per sector scanned (light curves + results)
 
-### Steps
+### Setup
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/Suacett/tess-exoplanet.git
 cd tess-exoplanet
-
-# 2. Create a virtual environment
-python3.12 -m venv venv
-source venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Create the runtime directories
-mkdir -p data/tess data/results data/candidates logs
-
-# 5. Pull the ExoMiner++ container image (one-time, ~4 GB)
-podman pull ghcr.io/nasa/exominer:latest
+./bootstrap.sh
 ```
 
-> **ExoMiner++ weights** are bundled inside the official NASA container image — no separate download is needed. The image ships with all three model variants (`exominer++_single`, `_cviter-mean-ensemble`, `_cv-super-mean-ensemble`). Pull the image as shown above and it's ready to use.
+`bootstrap.sh` checks for Python 3.12, creates the virtualenv, installs all dependencies, creates the runtime data directories, and pulls the ExoMiner++ container image (one-time, ~4 GB). It prints install hints if Python 3.12 or Podman are missing.
+
+> **ExoMiner++ weights** are bundled inside the official NASA container image — no separate download is needed.
 
 ---
 
 ## Usage
 
-### Run a full sector hunt (BLS → ExoMiner++)
-
 ```bash
-# Activate the venv first
 source venv/bin/activate
 
-# Search sector 10 — downloads light curves, runs BLS, scores with ExoMiner++
+# Launch the full dashboard
+streamlit run scripts/dashboard.py
+# Open http://localhost:8501
+
+# Run a full BLS + ExoMiner++ sector search
 python scripts/hunt.py --sector 10
 
-# Limit to 50 stars for a quick test
+# Quick test (50 stars, no scoring)
 python scripts/hunt.py --sector 10 --limit 50 --no-score
 ```
 
 Results are written to `data/results/sector10/`.
-
-### Launch the dashboard
-
-```bash
-streamlit run dashboard.py
-# Open http://localhost:8501
-```
-
-The dashboard has three pages: **Pipeline Status** (live job monitor), **Candidate Browser** (filter and rank by ExoMiner++ score), and **Lightcurve Inspector** (phase-folded transit viewer).
 
 ### Other scripts
 
@@ -81,10 +62,9 @@ The dashboard has three pages: **Pipeline Status** (live job monitor), **Candida
 | `scripts/deep_scan.py` | Multi-sector stitched BLS for long-period planets (>27 days) |
 | `scripts/prefetch_sector.py` | Pre-download FITS files for offline scanning |
 | `scripts/check_new_sectors.py` | Check MAST for newly available TESS sectors |
+| `scripts/monitor.sh` | Live system monitor (requires `lm-sensors` and `sysstat`: `sudo apt install lm-sensors sysstat`) |
 
-### Score specific candidates with ExoMiner++
-
-See [EXOMINER_HOWTO.md](EXOMINER_HOWTO.md) for the full Podman invocation and output format.
+For ExoMiner++ invocation details and output format see [EXOMINER_HOWTO.md](EXOMINER_HOWTO.md).
 
 ---
 
@@ -113,7 +93,7 @@ ExoMiner++ runs via the official NASA container image (`ghcr.io/nasa/exominer:la
 3. Passes these features through the trained network
 4. Outputs a score from 0 (false positive) to 1 (planet) per TCE
 
-Scores above ~0.5 are worth inspecting; scores above ~0.9 are strong candidates. See [EXOMINER_HOWTO.md](EXOMINER_HOWTO.md) for model variant details and how to interpret the output.
+Scores above ~0.5 are worth inspecting; scores above ~0.9 are strong candidates.
 
 ### 4 — Verification
 
