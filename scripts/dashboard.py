@@ -2184,11 +2184,10 @@ elif page == "Lightcurve Inspector":
         max_period_slider = max(30.0, max(slider_period_candidates) * 1.1)
         adj_period = st.slider(
             "Selected period (days)",
-            0.1,
-            float(max_period_slider),
-            float(selected_period),
-            0.0001,
-            "%.4f",
+            min_value=0.1,
+            max_value=float(max_period_slider),
+            step=0.0001,
+            format="%.4f",
             key="insp_selected_period",
         )
         adj_t0 = st.slider(

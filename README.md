@@ -4,12 +4,7 @@ Automated pipeline for hunting exoplanet transit signals in NASA TESS photometry
 
 It downloads TESS light curves from NASA MAST, runs a Box Least Squares (BLS) period search across every star in a sector, and pipes the strongest candidates through NASA's ExoMiner++ neural network classifier to separate genuine transits from astrophysical false positives.
 
----
-
-## Screenshot
-
-<!-- TODO: Add Streamlit dashboard screenshot -->
-> *Screenshot coming soon — run `streamlit run scripts/dashboard.py` to see the live pipeline dashboard.*
+*Personal research project — actively scanning TESS sectors on a Threadripper PRO workstation.*
 
 ---
 
@@ -81,6 +76,8 @@ For each target the pipeline runs a **Box Least Squares** (BLS) periodogram ([Ko
 BLS folds the light curve at each trial period and fits a box-shaped dip, computing a Signal Detection Efficiency (SDE) score. Peaks in SDE space indicate periodic dimming events consistent with a transiting object. The pipeline retains candidates above a configurable SDE threshold (default 9.0) and records their period, epoch, depth, and duration.
 
 This step runs across all targets in the sector in parallel using Python's `multiprocessing` — 16 workers on a Threadripper PRO can process a full sector (~20,000 stars) in a few hours.
+
+**Performance:** On the AMD Threadripper PRO 3955WX (16c/32t) used here, a full sector completes in 2–4 hours. Period search is the bottleneck; ExoMiner++ scoring adds roughly 30 minutes per 1,000 candidates.
 
 ### 3 — ExoMiner++ scoring
 

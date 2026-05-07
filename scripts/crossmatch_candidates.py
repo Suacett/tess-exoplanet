@@ -16,6 +16,7 @@ import json
 import math
 import re
 import signal
+import threading
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,19 @@ def safe_int(value):
         return None
 
 
+
+def parse_tic_id(value) -> int | None:
+    if value in ("", None):
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        try:
+            return int(str(value).split("-")[0])
+        except (ValueError, TypeError):
+            return None
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -156,7 +170,7 @@ def sql_quote(text: str) -> str:
 
 
 def cache_path_for_tic(tic_id: int | str) -> Path:
-    return CACHE_DIR / f"tic_{int(tic_id)}.json"
+    return CACHE_DIR / f"tic_{parse_tic_id(tic_id)}.json"
 
 
 def ensure_dirs() -> None:
@@ -220,17 +234,20 @@ class tic_timeout:
     def __init__(self, seconds: int):
         self.seconds = int(seconds)
         self.previous_handler = None
+        self._active = False
 
     def __enter__(self):
-        if self.seconds > 0:
+        if self.seconds > 0 and threading.current_thread() is threading.main_thread():
             self.previous_handler = signal.signal(signal.SIGALRM, _timeout_handler)
             signal.setitimer(signal.ITIMER_REAL, self.seconds)
+            self._active = True
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        if self.previous_handler is not None:
-            signal.signal(signal.SIGALRM, self.previous_handler)
+        if self._active:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if self.previous_handler is not None:
+                signal.signal(signal.SIGALRM, self.previous_handler)
         return False
 
 
@@ -509,7 +526,7 @@ def ensure_cache_for_tics(
     tracker: ProgressTracker | None = None,
 ) -> dict:
     ensure_dirs()
-    tics = sorted({int(t) for t in tic_ids if t not in ("", None)})
+    tics = sorted({t for t in (parse_tic_id(raw) for raw in tic_ids if raw not in ("", None)) if t is not None})
     stale = []
     fresh_hits = 0
     total_tics = len(tics)
@@ -993,7 +1010,9 @@ def ensure_detailed_cache_for_tics(
 
 
 def get_crossmatch(tic_id: int | str, local_period: float | None = None, detailed: bool = True, max_age_days: int = CACHE_TTL_DAYS) -> dict:
-    tic_int = int(tic_id)
+    tic_int = parse_tic_id(tic_id)
+    if tic_int is None:
+        return build_result_from_cache(None, safe_float(local_period))
     ensure_cache_for_tics([tic_int], detailed=False, max_age_days=max_age_days)
     if detailed:
         maybe_upgrade_cache_for_detail(tic_int, max_age_days=max_age_days)
@@ -1009,7 +1028,7 @@ def annotate_candidate_rows(
     output_path: Path | None = None,
     build_mode: str = "full",
 ) -> list[dict]:
-    tics = [int(row["tic_id"]) for row in rows if row.get("tic_id") not in ("", None)]
+    tics = [t for t in (parse_tic_id(row["tic_id"]) for row in rows if row.get("tic_id") not in ("", None)) if t is not None]
     tracker = ProgressTracker(progress_file, rows_total=len(rows), unique_tics_total=len(sorted(set(tics))), output_path=output_path)
     tracker.update(build_mode=build_mode)
     tracker.log(
@@ -1132,7 +1151,7 @@ def build_fast_shortlist_for_sectors(sectors: list[int], progress_file: Path | N
             row.setdefault("sector", sector)
             rows.append(row)
 
-    tics = [int(row["tic_id"]) for row in rows if row.get("tic_id") not in ("", None)]
+    tics = [t for t in (parse_tic_id(row["tic_id"]) for row in rows if row.get("tic_id") not in ("", None)) if t is not None]
     tracker = ProgressTracker(progress_file, rows_total=len(rows), unique_tics_total=len(sorted(set(tics))), output_path=output_path)
     tracker.update(build_mode="fast")
     tracker.log(f"Starting fast triage-first shortlist for {len(rows)} rows across {len(sorted(set(tics)))} unique TICs.")
