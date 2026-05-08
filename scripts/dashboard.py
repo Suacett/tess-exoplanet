@@ -559,6 +559,18 @@ def extract_corrupt_cache_path(error_text: str) -> Path | None:
 
 
 def fetch_inspector_lightcurves(lk, tic_str: str, author: str):
+    tic_id = int(tic_str.replace("TIC", "").strip())
+    pattern = f"*-{tic_id:016d}-*_lc.fits"
+    local_lcs = []
+    for fits_path in sorted(TESS_DIR.glob(f"sector*/{pattern}")):
+        try:
+            lc = lk.read(str(fits_path), quality_bitmask="default")
+            local_lcs.append(lc)
+        except Exception:
+            pass
+    if local_lcs:
+        lcs = lk.LightCurveCollection(local_lcs)
+        return None, lcs
     results = lk.search_lightcurve(tic_str, mission="TESS", author=author, exptime=120)
     if len(results) == 0:
         results = lk.search_lightcurve(tic_str, mission="TESS")
@@ -1315,6 +1327,23 @@ def _discover_candidate_files() -> list:
     )
 
 
+@st.cache_data(ttl=60)
+def _cached_scan_dirs() -> list:
+    if not RESULTS_DIR.exists():
+        return []
+    return sorted(
+        [d for d in RESULTS_DIR.iterdir()
+         if d.is_dir() and (d / "bls_results.csv").exists()],
+        reverse=True,
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_verify(tic_id: int, period: float, t0) -> dict:
+    from verify_candidate import verify
+    return verify(tic_id=tic_id, period=period, t0=t0)
+
+
 def sector_hunt_complete(sector: int) -> bool:
     res_dir = RESULTS_DIR / f"sector{sector:02d}"
     csv_path = res_dir / "bls_results.csv"
@@ -1489,7 +1518,7 @@ completes in 20–60 minutes.
     st.markdown("---")
     st.subheader("Recent Scan Activity")
     if RESULTS_DIR.exists():
-        scans = sorted(RESULTS_DIR.iterdir(), reverse=True)
+        scans = _cached_scan_dirs()
         if scans:
             for s in scans[:5]:
                 csv_f = s / "bls_results.csv"
@@ -2232,7 +2261,23 @@ elif page == "Lightcurve Inspector":
         st.session_state["_insp_prev_selected_period"] = float(adj_period)
         st.session_state["_insp_prev_selected_t0"] = float(adj_t0)
 
-        folded_summary = fold_signal_summary(lc_flat, adj_period, adj_t0) or {}
+        _fold_cache_key = "insp_last_fold_result"
+        _fold_period_key = "insp_last_fold_period"
+        _fold_t0_key = "insp_last_fold_t0"
+        _last_fp = st.session_state.get(_fold_period_key)
+        _last_ft = st.session_state.get(_fold_t0_key)
+        _needs_fold = (
+            _last_fp is None
+            or not periods_agree(adj_period, _last_fp, rel_tol=0.0005)
+            or abs(adj_t0 - _last_ft) > 0.002
+        )
+        if _needs_fold:
+            folded_summary = fold_signal_summary(lc_flat, adj_period, adj_t0) or {}
+            st.session_state[_fold_cache_key] = folded_summary
+            st.session_state[_fold_period_key] = adj_period
+            st.session_state[_fold_t0_key] = adj_t0
+        else:
+            folded_summary = st.session_state.get(_fold_cache_key, {})
         depth_adj = folded_summary.get("depth_ppm", st.session_state.get("insp_depth", 0.0))
         public_match = get_crossmatch(tic_id, adj_period, detailed=True)
         matched_period = safe_float((public_match or {}).get("matched_period"))
@@ -2502,9 +2547,8 @@ elif page == "Lightcurve Inspector":
             key="verify_all_sectors",
             help="This checks whether the currently selected period repeats across all available sectors.",
         ):
-            from verify_candidate import verify as _verify
             with st.spinner("Downloading all sectors and checking consistency..."):
-                _vr = _verify(tic_id=int(tic_id), period=adj_period, t0=adj_t0)
+                _vr = _cached_verify(int(tic_id), round(adj_period, 6), round(adj_t0, 4) if adj_t0 else None)
             st.session_state["insp_verify_result"] = _vr
             st.session_state["insp_verify_period"] = adj_period
             st.rerun()
@@ -2586,12 +2630,7 @@ elif page == "Scan Results":
 | Hot Jupiter (1.5 R_J) | ~24,000 ppm |
 """)
 
-    scan_dirs = []
-    if RESULTS_DIR.exists():
-        scan_dirs = sorted(
-            [d for d in RESULTS_DIR.iterdir() if d.is_dir() and (d / "bls_results.csv").exists()],
-            reverse=True,
-        )
+    scan_dirs = _cached_scan_dirs()
 
     if not scan_dirs:
         st.info("No completed scans. Use the **Run Scan** page to start.")
