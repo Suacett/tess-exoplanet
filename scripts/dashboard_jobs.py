@@ -216,7 +216,7 @@ def run_scan_all(job: JobRunner, min_sector: int, workers: int, limit: int, no_s
         return 0
 
     job.log(f"Downloaded unfinished sectors to scan: {targets}")
-    for sector in targets:
+    for i, sector in enumerate(targets):
         sector_log = RESULTS_DIR / f"sector{sector:02d}" / "hunt.log"
         job.update(current_sector=sector, current_log_file=str(sector_log))
         job.log(f"Starting hunt for sector {sector}...")
@@ -227,6 +227,8 @@ def run_scan_all(job: JobRunner, min_sector: int, workers: int, limit: int, no_s
             "--workers", str(workers),
             "--limit", str(limit),
         ]
+        if i + 1 < len(targets):
+            cmd += ["--next-sector", str(targets[i + 1])]
         if no_score:
             cmd.append("--no-score")
         rc = job.run_subprocess(cmd)

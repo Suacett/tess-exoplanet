@@ -97,7 +97,7 @@ def find_local_fits(sector: int, tic_id: int) -> Path | None:
 # ── Per-star worker ───────────────────────────────────────────────────────────
 
 def process_tic(args: tuple) -> dict | None:
-    tic_id, sector = args
+    tic_id, sector, period_step = args
     try:
         import warnings
         warnings.filterwarnings("ignore")
@@ -122,7 +122,7 @@ def process_tic(args: tuple) -> dict | None:
         if len(lc_flat) < 200:
             return None
 
-        periods   = np.arange(0.5, 14.0, 0.01)
+        periods   = np.arange(0.5, 14.0, period_step)
         durations = np.arange(0.05, 0.20, 0.02)
         blsm = lc_flat.to_periodogram(method="bls", period=periods, duration=durations)
 
@@ -503,6 +503,8 @@ def main():
                         help="Skip HTML report generation")
     parser.add_argument("--watch",  action="store_true",
                         help="Print periodic per-core CPU stats while scanning")
+    parser.add_argument("--period-step", type=float, default=0.02,
+                        help="BLS period grid step in days (default 0.02, was 0.01)")
     parser.add_argument("--prefetch", action="store_true",
                         help="Use only local FITS files — no downloading. "
                              "Run prefetch_sector.py first to populate the cache.")
@@ -558,7 +560,7 @@ def main():
         tic_ids = tic_ids[: args.limit]
 
     n_total = len(tic_ids)
-    work    = [(tid, sector) for tid in tic_ids]
+    work    = [(tid, sector, args.period_step) for tid in tic_ids]
 
     print_banner(sector, n_total, workers)
 

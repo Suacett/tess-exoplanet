@@ -155,6 +155,8 @@ def main():
     ap.add_argument("--no-score",  action="store_true")
     ap.add_argument("--no-verify", action="store_true",
                     help="Skip multi-sector verification step")
+    ap.add_argument("--next-sector", type=int, default=None,
+                    help="Sector to pre-warm in background while this sector scans")
     args = ap.parse_args()
 
     sector   = args.sector
@@ -202,7 +204,9 @@ def main():
         log(lf, "🔥 Pre-loading sector FITS into RAM...")
         t_warm = time.time()
         subprocess.run(
-            ["find", str(dl_dir), "-name", "*_lc.fits", "-exec", "cat", "{}", "+"],
+            ["bash", "-c",
+             f"find {dl_dir} -name '*_lc.fits' -print0"
+             " | xargs -0 -P4 -n128 cat > /dev/null"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         log(lf, f"   ✅ {len(fits_files):,} files warm in page cache ({time.time()-t_warm:.0f}s)")
@@ -213,6 +217,19 @@ def main():
         log(lf, f"🔍 Step 2/4 — Searching {n_stars:,} stars for transiting planets...")
         log(lf, f"   (Looking for repeating dips in brightness that could be a planet passing in front)")
         t2 = time.time()
+
+        # Background pre-warm next sector while BLS scan runs
+        _prewarm_proc = None
+        if args.next_sector is not None:
+            _next_dl = TESS_DIR / f"sector{args.next_sector:02d}"
+            if _next_dl.exists() and list(_next_dl.glob("*_lc.fits")):
+                log(lf, f"🔥 Background pre-warm: sector {args.next_sector} (runs in parallel with scan)")
+                _prewarm_proc = subprocess.Popen(
+                    ["bash", "-c",
+                     f"find {_next_dl} -name '*_lc.fits' -print0"
+                     " | xargs -0 -P4 -n128 cat > /dev/null"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
 
         bls_cmd = [
             sys.executable, str(SCRIPTS_DIR / "scan_sector.py"),
@@ -264,6 +281,9 @@ def main():
                         f" — {cands} signals found — {rate:.1f} stars/sec{eta_str}")
         proc.wait()
         elapsed2 = time.time() - t2
+        if _prewarm_proc is not None:
+            _prewarm_proc.wait()
+            log(lf, f"   ✅ Background pre-warm of sector {args.next_sector} complete")
 
         # Drain remaining CANDIDATE lines
         try:
