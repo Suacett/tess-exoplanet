@@ -54,39 +54,60 @@ def _log(*args, **kwargs) -> None:
 
 # ── Sector download ───────────────────────────────────────────────────────────
 
+TESS_LOCAL_DIR = DATA_DIR / "tess"
+
+
+def _load_local_sectors(tic_id: int) -> dict:
+    """Load any locally cached FITS files for this TIC. Returns {sector: lc}."""
+    import lightkurve as lk
+    sector_map = {}
+    pattern = f"*-{tic_id:016d}-*_lc.fits"
+    for fits_path in sorted(TESS_LOCAL_DIR.glob(f"sector*/{pattern}")):
+        try:
+            lc = lk.read(str(fits_path), quality_bitmask="default")
+            sec = getattr(lc, "sector", None)
+            if sec is None:
+                sec = lc.meta.get("SECTOR") or lc.meta.get("sector")
+            if sec is None:
+                # parse sector from directory name
+                sec = int(fits_path.parent.name.replace("sector", ""))
+            sec = int(sec)
+            if sec not in sector_map:
+                sector_map[sec] = lc
+        except Exception:
+            pass
+    return sector_map
+
+
 def download_all_sectors(tic_id: int, author: str = "SPOC") -> list:
     """
     Return list of (sector_int, LightCurve) for every available sector.
-    Falls back to author=None if SPOC returns nothing.
+    Uses local FITS files first; falls back to MAST only for missing sectors.
     """
     import lightkurve as lk
-    from astropy import units as u
 
-    target = f"TIC {tic_id}"
-    sr = lk.search_lightcurve(target, mission="TESS", author=author, exptime=120)
-    if len(sr) == 0:
-        # Retry without author filter
-        sr = lk.search_lightcurve(target, mission="TESS")
+    sector_map = _load_local_sectors(tic_id)
 
-    if len(sr) == 0:
-        return []
-
-    lcs = sr.download_all(quality_bitmask="default")
-    if lcs is None or len(lcs) == 0:
-        return []
-
-    # Split by sector
-    sector_map = {}
-    for lc in lcs:
-        sec = getattr(lc, "sector", None)
-        if sec is None:
-            sec = lc.meta.get("SECTOR") or lc.meta.get("sector")
-        if sec is None:
-            continue
-        sec = int(sec)
-        if sec not in sector_map:
-            sector_map[sec] = lc
-        # keep only one lightcurve per sector (prefer existing)
+    if not sector_map:
+        # No local data at all — fall back to full MAST download
+        target = f"TIC {tic_id}"
+        sr = lk.search_lightcurve(target, mission="TESS", author=author, exptime=120)
+        if len(sr) == 0:
+            sr = lk.search_lightcurve(target, mission="TESS")
+        if len(sr) == 0:
+            return []
+        lcs = sr.download_all(quality_bitmask="default")
+        if lcs is None or len(lcs) == 0:
+            return []
+        for lc in lcs:
+            sec = getattr(lc, "sector", None)
+            if sec is None:
+                sec = lc.meta.get("SECTOR") or lc.meta.get("sector")
+            if sec is None:
+                continue
+            sec = int(sec)
+            if sec not in sector_map:
+                sector_map[sec] = lc
 
     return sorted(sector_map.items())   # [(sector_int, lc), ...]
 
