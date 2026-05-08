@@ -174,55 +174,67 @@ def process_tic(args: tuple) -> dict | None:
 
 # ── Post-scan: plot generation ────────────────────────────────────────────────
 
-def generate_plots(candidates: list, sector: int, plot_dir: Path) -> list:
-    """Generate 4-panel PNGs for candidates above PLOT_THRESHOLD. Returns list of (tic_id, path)."""
-    sys.path.insert(0, str(SCRIPTS_DIR))
-    from plot_candidate import make_4panel
-    import lightkurve as lk
-    from astropy import units as u
-    import warnings
+def _plot_one(args: tuple) -> tuple:
+    """Worker function for parallel plot generation — must be top-level for pickling."""
+    r, sector, plot_dir_str, scripts_dir_str = args
+    import sys, warnings
+    sys.path.insert(0, scripts_dir_str)
     warnings.filterwarnings("ignore")
+    import matplotlib
+    matplotlib.use("Agg")
+    import lightkurve as lk
+    from plot_candidate import make_4panel
 
+    tic_id = r["tic_id"]
+    plot_dir = Path(plot_dir_str)
+    out_png = plot_dir / f"tic_{tic_id}_s{sector:02d}.png"
+    try:
+        local = find_local_fits(sector, tic_id)
+        if local:
+            lc_raw = lk.read(str(local), quality_bitmask="default")
+        else:
+            sr = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS",
+                                       author="SPOC", sector=sector)
+            if len(sr) == 0:
+                return (tic_id, None, "no data")
+            lc_raw = sr[0].download(quality_bitmask="default")
+        lc_flat = lc_raw.normalize().flatten(window_length=401).remove_outliers(sigma=4)
+        make_4panel(
+            lc_raw=lc_raw,
+            lc_flat=lc_flat,
+            period_d=r["period"],
+            t0_btjd=r["t0"],
+            tic_id=tic_id,
+            sector=sector,
+            depth_ppm=r["depth_ppm"],
+            bls_power=r["bls_power"],
+            out_path=str(out_png),
+        )
+        return (tic_id, out_png, None)
+    except Exception as e:
+        return (tic_id, None, str(e))
+
+
+def generate_plots(candidates: list, sector: int, plot_dir: Path,
+                   workers: int = 1) -> list:
+    """Generate 4-panel PNGs in parallel. Returns list of (tic_id, path)."""
     plot_dir.mkdir(parents=True, exist_ok=True)
-    generated = []
     strong = [r for r in candidates if r["bls_power"] >= PLOT_THRESHOLD]
-
     if not strong:
-        return generated
+        return []
 
-    console.print(Rule(f"[bold]Generating {len(strong)} plots (BLS power ≥ {PLOT_THRESHOLD})[/bold]"))
+    console.print(Rule(f"[bold]Generating {len(strong)} plots (BLS power ≥ {PLOT_THRESHOLD}) — {workers} workers[/bold]"))
 
-    for r in strong:
-        tic_id = r["tic_id"]
-        out_png = plot_dir / f"tic_{tic_id}_s{sector:02d}.png"
-        try:
-            local = find_local_fits(sector, tic_id)
-            if local:
-                lc_raw = lk.read(str(local), quality_bitmask="default")
+    work = [(r, sector, str(plot_dir), str(SCRIPTS_DIR)) for r in strong]
+    generated = []
+    with mp.Pool(processes=min(workers, len(strong)),
+                 maxtasksperchild=8) as pool:
+        for tic_id, out_png, err in pool.imap_unordered(_plot_one, work, chunksize=4):
+            if err:
+                console.log(f"  [red]✗[/red] TIC {tic_id}: {err}")
             else:
-                sr = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS",
-                                           author="SPOC", sector=sector)
-                if len(sr) == 0:
-                    continue
-                lc_raw = sr[0].download(quality_bitmask="default")
-
-            lc_flat = lc_raw.normalize().flatten(window_length=401).remove_outliers(sigma=4)
-            make_4panel(
-                lc_raw=lc_raw,
-                lc_flat=lc_flat,
-                period_d=r["period"],
-                t0_btjd=r["t0"],
-                tic_id=tic_id,
-                sector=sector,
-                depth_ppm=r["depth_ppm"],
-                bls_power=r["bls_power"],
-                out_path=str(out_png),
-            )
-            generated.append((tic_id, out_png))
-            console.log(f"  [green]✓[/green] TIC {tic_id} → {out_png.name}")
-        except Exception as e:
-            console.log(f"  [red]✗[/red] TIC {tic_id}: {e}")
-
+                generated.append((tic_id, out_png))
+                console.log(f"  [green]✓[/green] TIC {tic_id} → {out_png.name}")
     return generated
 
 
@@ -689,7 +701,7 @@ def main():
 
     # ── Generate plots ───────────────────────────────────────────────────
     if not args.no_plots:
-        generated = generate_plots(candidates, sector, plot_dir)
+        generated = generate_plots(candidates, sector, plot_dir, workers=workers)
     else:
         generated = []
 
