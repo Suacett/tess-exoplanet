@@ -56,8 +56,8 @@ def _bls_star(cp, time_cp, flux_cp):
 
     bf = cp.zeros(N_p * N_BINS, dtype=cp.float32)
     bc = cp.zeros(N_p * N_BINS, dtype=cp.float32)
-    cp.scatter_add(bf, flat_idx, cp.tile(flux_norm, N_p))
-    cp.scatter_add(bc, flat_idx, cp.ones(N_p * N_t, dtype=cp.float32))
+    cp.add.at(bf, flat_idx, cp.tile(flux_norm, N_p))
+    cp.add.at(bc, flat_idx, cp.ones(N_p * N_t, dtype=cp.float32))
 
     bf = bf.reshape(N_p, N_BINS)   # (N_p, N_BINS)
     bc = bc.reshape(N_p, N_BINS)
@@ -93,9 +93,8 @@ def _bls_star(cp, time_cp, flux_cp):
         n_out = total_c - n_in
 
         # Transit signal: depth × sqrt(n_in) — negative s_in = flux dip = transit
-        with cp.errstate(divide="ignore", invalid="ignore"):
-            signal = -(s_in / (n_in + 1e-6)) + (s_out / (n_out + 1e-6))
-            power  = cp.nan_to_num(signal * cp.sqrt(cp.maximum(n_in, 0)), nan=0.0)
+        signal = -(s_in / (n_in + 1e-6)) + (s_out / (n_out + 1e-6))
+        power  = cp.nan_to_num(signal * cp.sqrt(cp.maximum(n_in, 0)), nan=0.0)
 
         best_center = cp.argmax(power, axis=1)                       # (N_p,)
         max_p       = power[cp.arange(N_p), best_center]             # (N_p,)
@@ -122,7 +121,7 @@ def _bls_star(cp, time_cp, flux_cp):
     dur_d_out   = float(best_dur[best_idx].item())
 
     # t0: time at which best transit centre occurs
-    t0 = float(time_cp[0].item()) + t0_phase * best_period
+    t0 = (float(time_cp[0].item()) // best_period) * best_period + t0_phase * best_period
 
     return best_period, t0, sde, dur_d_out
 
