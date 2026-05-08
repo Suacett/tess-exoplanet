@@ -590,7 +590,7 @@ def main():
 
         with mp.Pool(processes=workers) as pool:
             for i, result in enumerate(
-                pool.imap_unordered(process_tic, work, chunksize=4), 1
+                pool.imap_unordered(process_tic, work, chunksize=16), 1
             ):
                 elapsed_now = time.time() - t0
                 rate = i / elapsed_now if elapsed_now > 0 else 0

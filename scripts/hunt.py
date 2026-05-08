@@ -149,7 +149,7 @@ def run_logged(cmd, log_path: Path, cwd=None) -> int:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sector",    type=int, required=True)
-    ap.add_argument("--workers",   type=int, default=16)
+    ap.add_argument("--workers",   type=int, default=28)
     ap.add_argument("--limit",     type=int, default=0)
     ap.add_argument("--threshold", type=float, default=7.0)
     ap.add_argument("--no-score",  action="store_true")
@@ -162,6 +162,11 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "hunt.log"
     dl_dir   = TESS_DIR / f"sector{sector:02d}"
+
+    # Pin BLAS/OMP to 1 thread per worker — prevents 28 mp.Pool workers each
+    # spawning 32 OpenBLAS threads and causing severe oversubscription.
+    for _blas_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ.setdefault(_blas_var, "1")
 
     with open(log_path, "w", buffering=1) as lf:
         t0 = time.time()
@@ -191,6 +196,16 @@ def main():
             else:
                 log(lf, f"   ❌ Download failed (exit {rc}) — cannot continue")
                 return
+        log(lf)
+
+        # ── Page-cache pre-warm ──────────────────────────────────────────────
+        log(lf, "🔥 Pre-loading sector FITS into RAM...")
+        t_warm = time.time()
+        subprocess.run(
+            ["find", str(dl_dir), "-name", "*_lc.fits", "-exec", "cat", "{}", "+"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        log(lf, f"   ✅ {len(fits_files):,} files warm in page cache ({time.time()-t_warm:.0f}s)")
         log(lf)
 
         # ── Step 2: BLS Detect ────────────────────────────────────────────────

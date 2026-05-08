@@ -68,6 +68,7 @@ DEEP_SCAN_PRESETS = {
 }
 
 
+@st.cache_data(ttl=60)
 def get_downloaded_sectors() -> list[int]:
     """Return sorted list of sector numbers that have at least one FITS file on disk."""
     if not TESS_DIR.exists():
@@ -1279,6 +1280,41 @@ def render_shortlist_progress(progress: dict) -> None:
         st.caption(f"Last error: {progress['last_error']}")
 
 
+@st.cache_data(ttl=120)
+def _cached_dir_file_count(path_str: str) -> int:
+    return sum(1 for f in Path(path_str).rglob("*") if f.is_file())
+
+
+@st.cache_data(ttl=120)
+def _cached_tess_download_status() -> list[dict]:
+    rows = []
+    if not TESS_DIR.exists():
+        return rows
+    for d in sorted(TESS_DIR.iterdir()):
+        if d.is_dir():
+            m_dl = re.match(r'sector(\d+)', d.name)
+            if m_dl:
+                fits = list(d.glob("*_lc.fits"))
+                if fits:
+                    size_mb = sum(f.stat().st_size for f in fits) / 1_048_576
+                    rows.append({
+                        "Sector": int(m_dl.group(1)),
+                        "Files": len(fits),
+                        "Size (MB)": round(size_mb, 1),
+                    })
+    return rows
+
+
+@st.cache_data(ttl=120)
+def _discover_candidate_files() -> list:
+    return (
+        sorted(ZENODO_DIR.glob("*.csv")) +
+        sorted(ZENODO_DIR.glob("*.parquet")) +
+        sorted(CANDS_DIR.glob("*.csv")) +
+        sorted(RESULTS_DIR.rglob("bls_exominer_results.csv"))
+    )
+
+
 def sector_hunt_complete(sector: int) -> bool:
     res_dir = RESULTS_DIR / f"sector{sector:02d}"
     csv_path = res_dir / "bls_results.csv"
@@ -1425,7 +1461,7 @@ completes in 20–60 minutes.
     for col, (label, path) in zip(cols, dirs.items()):
         with col:
             if path.is_dir():
-                n = sum(1 for f in path.rglob("*") if f.is_file())
+                n = _cached_dir_file_count(str(path))
                 st.metric(label, f"{n} files")
             else:
                 st.metric(label, "not found")
@@ -1433,19 +1469,7 @@ completes in 20–60 minutes.
     st.markdown("---")
     st.subheader("Download Status")
     if TESS_DIR.exists():
-        dl_rows = []
-        for d in sorted(TESS_DIR.iterdir()):
-            if d.is_dir():
-                m_dl = re.match(r'sector(\d+)', d.name)
-                if m_dl:
-                    fits = list(d.glob("*_lc.fits"))
-                    if fits:
-                        size_mb = sum(f.stat().st_size for f in fits) / 1_048_576
-                        dl_rows.append({
-                            "Sector": int(m_dl.group(1)),
-                            "Files": len(fits),
-                            "Size (MB)": round(size_mb, 1),
-                        })
+        dl_rows = _cached_tess_download_status()
         if dl_rows:
             _dl_df = pd.DataFrame(dl_rows)
             st.dataframe(_dl_df, use_container_width=True, hide_index=True)
@@ -1606,12 +1630,7 @@ elif page == "Candidate Browser":
     if "catalog_df" not in st.session_state:
         st.session_state.catalog_df = None
 
-    candidates = (
-        list(ZENODO_DIR.glob("*.csv")) +
-        list(ZENODO_DIR.glob("*.parquet")) +
-        list(CANDS_DIR.glob("*.csv")) +
-        list(RESULTS_DIR.rglob("bls_exominer_results.csv"))
-    )
+    candidates = _discover_candidate_files()
 
     uploaded = st.file_uploader("Upload catalog CSV", type=["csv", "parquet"])
 
@@ -2607,7 +2626,10 @@ elif page == "Scan Results":
     if em_csv.exists():
         csv_path = em_csv
 
-    df = pd.read_csv(csv_path)
+    _scan_key = f"scan_df_{csv_path}"
+    if _scan_key not in st.session_state:
+        st.session_state[_scan_key] = pd.read_csv(csv_path)
+    df = st.session_state[_scan_key]
 
     # Load filter stats if available
     _stats_file = scan_dir / "scan_filter_stats.json"
