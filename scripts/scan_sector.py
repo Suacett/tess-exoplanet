@@ -45,6 +45,12 @@ RESULTS_DIR   = DATA_DIR / "results"
 TRACKING_FILE = DATA_DIR / "scanned_sectors.json"
 SCRIPTS_DIR   = Path(__file__).parent
 
+# GPU BLS service — opt-in. Set GPU_BLS_URL=http://<host>:9876 to enable.
+# Unset (default) = CPU-only mode; behaviour is identical for end users.
+_GPU_URL   = os.environ.get("GPU_BLS_URL")   # None = CPU-only
+_GPU_BATCH = 100                              # stars per HTTP request
+
+
 CANDIDATE_THRESHOLD = 7.0    # ⚡ alert threshold
 PLOT_THRESHOLD      = 9.0    # generate 4-panel PNG above this
 LOG_EVERY           = 10     # print live stats every N stars
@@ -92,6 +98,83 @@ def find_local_fits(sector: int, tic_id: int) -> Path | None:
             if hits:
                 return hits[0]
     return None
+
+
+def _load_and_flatten(args: tuple):
+    """Load + flatten one lightcurve. Thread-safe (ThreadPoolExecutor).
+    Returns (tic_id, time_list, flux_list) or None on failure."""
+    tic_id, sector = args
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import lightkurve as lk
+        local_path = find_local_fits(sector, tic_id)
+        if local_path:
+            lc = lk.read(str(local_path), quality_bitmask="default")
+        else:
+            sr = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS",
+                                       author="SPOC", sector=sector)
+            if len(sr) == 0:
+                return None
+            lc = sr[0].download(quality_bitmask="default")
+        if lc is None or len(lc) < 200:
+            return None
+        lc_flat = lc.normalize().flatten(window_length=401).remove_outliers(sigma=4)
+        if len(lc_flat) < 200:
+            return None
+        return (tic_id, lc_flat.time.value.tolist(), lc_flat.flux.value.tolist())
+    except Exception as exc:
+        logging.debug(f"TIC {tic_id} load: {exc}")
+        return None
+
+
+def _depth_from_arrays(time_list, flux_list, period, t0):
+    """Compute depth/duration/SNR from pre-flattened arrays and BLS results."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    import lightkurve as lk
+    from astropy import units as u
+    time_arr  = np.array(time_list, dtype=float)
+    flux_arr  = np.array(flux_list, dtype=float)
+    time_span = time_arr[-1] - time_arr[0]
+    n_transits = max(1, int(time_span / period))
+    lc      = lk.LightCurve(time=time_arr, flux=flux_arr)
+    lc_fold = lc.fold(period=period * u.day, epoch_time=t0 * u.day)
+    lc_bin  = lc_fold.bin(time_bin_size=0.01)
+    flux_b  = np.ma.filled(np.asarray(lc_bin.flux.value), fill_value=np.nan).astype(float)
+    phase_b = np.asarray(lc_bin.phase.value, dtype=float)
+    baseline  = float(np.nanmedian(flux_b[np.abs(phase_b) > 0.15]))
+    in_tr     = flux_b[np.abs(phase_b) < 0.05]
+    min_flux  = float(np.nanmin(in_tr)) if in_tr.size else baseline
+    depth_ppm = (baseline - min_flux) / baseline * 1e6
+    half_lev  = baseline - (baseline - min_flux) * 0.5
+    dur_hours = float(np.sum(flux_b < half_lev) * 0.01 * period * 24)
+    snr       = depth_ppm / (float(np.nanstd(flux_b)) * 1e6 + 1e-9)
+    return {
+        "depth_ppm":      round(depth_ppm, 1),
+        "duration_hours": round(dur_hours, 3),
+        "snr":            round(snr, 2),
+        "n_transits":     n_transits,
+    }
+
+
+def _gpu_bls_batch(batch):
+    """POST a batch of stars to the GPU BLS service.
+    Returns list of result dicts, or None on any error (caller falls back to CPU)."""
+    if not _GPU_URL:
+        return None
+    try:
+        resp = requests.post(
+            _GPU_URL + "/bls",
+            json={"stars": [{"tic_id": t, "time": tm, "flux": fl}
+                             for t, tm, fl in batch]},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        logging.warning(f"GPU batch error: {exc}")
+        return None
 
 
 # ── Per-star worker ───────────────────────────────────────────────────────────
@@ -579,51 +662,132 @@ def main():
     # ── Parallel BLS scan ────────────────────────────────────────────────
     all_results = []   # everything that BLS ran on
     candidates  = []   # after filtering
-    skipped     = 0
-    t0          = time.time()
+    t0          = time.time()   # shared start time for both CPU and GPU paths
 
-    bls_label = (
-        "[bold cyan]BLS (local) sector {task.fields[sector]}[/bold cyan]"
-        if args.prefetch else
-        "[bold cyan]Scanning sector {task.fields[sector]}[/bold cyan]"
-    )
-    progress_cols = [
-        SpinnerColumn(),
-        TextColumn(bls_label),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TextColumn("{task.percentage:>3.0f}%"),
-        TimeRemainingColumn(),
-        TextColumn("[dim]{task.fields[rate]:.2f}/s[/dim]"),
-    ]
+    # ── GPU probe ────────────────────────────────────────────────────────
+    _use_gpu = False
+    if _GPU_URL:
+        try:
+            _use_gpu = requests.get(_GPU_URL + "/health", timeout=2).ok
+        except Exception:
+            pass
+        console.print(
+            f"[green]GPU service online → {_GPU_URL}[/green]" if _use_gpu
+            else "[yellow]GPU service unreachable — using CPU[/yellow]"
+        )
 
-    progress_file = out_dir / "scan_progress.json"
-
-    with Progress(*progress_cols, console=console, transient=False) as prog:
-        task = prog.add_task("Scanning…", total=n_total, sector=sector, rate=0.0)
-
-        with mp.Pool(processes=workers) as pool:
-            for i, result in enumerate(
-                pool.imap_unordered(process_tic, work, chunksize=16), 1
-            ):
-                elapsed_now = time.time() - t0
-                rate = i / elapsed_now if elapsed_now > 0 else 0
-                prog.update(task, advance=1, rate=rate)
-
-                if result is None:
+    _gpu_scan_done = False
+    if _use_gpu:
+        from concurrent.futures import ThreadPoolExecutor
+        import math as _math
+        skipped = 0
+        _preprocessed = []
+        console.print(
+            f"[cyan]Loading {n_total:,} lightcurves ({min(workers, 16)} threads)…[/cyan]"
+        )
+        with ThreadPoolExecutor(max_workers=min(workers, 16)) as _ex:
+            for _r in _ex.map(_load_and_flatten,
+                               [(tid, sector) for tid in tic_ids]):
+                if _r is None:
                     skipped += 1
                 else:
-                    all_results.append(result)
+                    _preprocessed.append(_r)
+        _star_lut = {r[0]: (r[1], r[2]) for r in _preprocessed}
+        _n_bat = max(1, _math.ceil(len(_preprocessed) / _GPU_BATCH))
+        console.print(
+            f"[cyan]GPU BLS: {len(_preprocessed):,} stars in {_n_bat} batches[/cyan]"
+        )
+        _done = 0
+        _pf   = out_dir / "scan_progress.json"
+        for _b0 in range(0, len(_preprocessed), _GPU_BATCH):
+            _batch   = _preprocessed[_b0:_b0 + _GPU_BATCH]
+            _gpu_res = _gpu_bls_batch(_batch)
+            if _gpu_res is None:
+                # Batch CPU fallback — GPU service unavailable for this batch
+                _cw = [(r[0], sector, args.period_step) for r in _batch]
+                with mp.Pool(processes=min(workers, len(_cw))) as _p:
+                    for _cr in _p.imap_unordered(process_tic, _cw):
+                        if _cr is not None:
+                            all_results.append(_cr)
+                        _done += 1
+            else:
+                for _gr in _gpu_res:
+                    _tid = _gr["tic_id"]
+                    if _tid in _star_lut:
+                        _d = _depth_from_arrays(
+                            *_star_lut[_tid], _gr["period"], _gr["t0"]
+                        )
+                        all_results.append({
+                            "tic_id":    _tid,
+                            "period":    _gr["period"],
+                            "t0":        _gr["t0"],
+                            "bls_power": _gr["sde"],
+                            **_d,
+                        })
+                _done  += len(_batch)
+                skipped += len(_batch) - len(_gpu_res)
+            _el = time.time() - t0
+            _rt = _done / _el if _el > 0 else 0
+            console.print(
+                f"  GPU batch {_b0 // _GPU_BATCH + 1}/{_n_bat}: "
+                f"{_done + skipped}/{n_total} "
+                f"({'GPU' if _gpu_res else 'CPU fallback'})"
+            )
+            try:
+                _pf.write_text(json.dumps({
+                    "sector": sector, "done": _done + skipped,
+                    "total": n_total, "candidates": len(all_results),
+                    "rate": round(_rt, 2),
+                }))
+            except Exception:
+                pass
+        _gpu_scan_done = True
 
-                # Write progress for dashboard to read
-                if i % LOG_EVERY == 0 or i == n_total:
-                    try:
-                        progress_file.write_text(json.dumps({
-                            "sector": sector, "total": n_total, "done": i,
-                            "candidates": len(all_results), "rate": round(rate, 2),
-                        }))
-                    except Exception:
-                        pass
+    if not _gpu_scan_done:
+        skipped = 0
+
+        bls_label = (
+            "[bold cyan]BLS (local) sector {task.fields[sector]}[/bold cyan]"
+            if args.prefetch else
+            "[bold cyan]Scanning sector {task.fields[sector]}[/bold cyan]"
+        )
+        progress_cols = [
+            SpinnerColumn(),
+            TextColumn(bls_label),
+            BarColumn(bar_width=40),
+            MofNCompleteColumn(),
+            TextColumn("{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+            TextColumn("[dim]{task.fields[rate]:.2f}/s[/dim]"),
+        ]
+
+        progress_file = out_dir / "scan_progress.json"
+
+        with Progress(*progress_cols, console=console, transient=False) as prog:
+            task = prog.add_task("Scanning…", total=n_total, sector=sector, rate=0.0)
+
+            with mp.Pool(processes=workers) as pool:
+                for i, result in enumerate(
+                    pool.imap_unordered(process_tic, work, chunksize=16), 1
+                ):
+                    elapsed_now = time.time() - t0
+                    rate = i / elapsed_now if elapsed_now > 0 else 0
+                    prog.update(task, advance=1, rate=rate)
+
+                    if result is None:
+                        skipped += 1
+                    else:
+                        all_results.append(result)
+
+                    # Write progress for dashboard to read
+                    if i % LOG_EVERY == 0 or i == n_total:
+                        try:
+                            progress_file.write_text(json.dumps({
+                                "sector": sector, "total": n_total, "done": i,
+                                "candidates": len(all_results), "rate": round(rate, 2),
+                            }))
+                        except Exception:
+                            pass
 
     stop_watch.set()
     elapsed = time.time() - t0
