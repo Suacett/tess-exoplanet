@@ -55,6 +55,32 @@ MIN_POINTS = 500
 MIN_TOTAL_DAYS = 30
 DEFAULT_WORKERS = 4
 DEFAULT_TARGET_ORDER = "quick-first"
+
+TESS_LOCAL_DIR = DATA_DIR / "tess"
+
+
+def _load_local_lcs(tic_id: int):
+    """Load all locally cached TESS FITS files for a TIC.
+    Returns (LightCurveCollection, [sector_ints]) or (None, []).
+    """
+    import lightkurve as lk
+    pattern = f"*-{tic_id:016d}-*_lc.fits"
+    lcs, sectors = [], []
+    for fits_path in sorted(TESS_LOCAL_DIR.glob(f"sector*/{pattern}")):
+        try:
+            lc = lk.read(str(fits_path), quality_bitmask="default")
+            sec = getattr(lc, "sector", None)
+            if sec is None:
+                sec = lc.meta.get("SECTOR") or lc.meta.get("sector")
+            if sec is None:
+                sec = int(fits_path.parent.name.replace("sector", ""))
+            lcs.append(lc)
+            sectors.append(int(sec))
+        except Exception:
+            pass
+    if not lcs:
+        return None, []
+    return lk.LightCurveCollection(lcs), sorted(sectors)
 DEFAULT_MAX_TARGET_MINUTES = 0.0
 
 CANDIDATE_FIELDS = [
@@ -644,55 +670,62 @@ def process_deep(task: dict) -> dict:
             from astropy import units as u
 
             heartbeat("searching")
-            sr = lk.search_lightcurve(
-                f"TIC {tic_id}",
-                mission="TESS",
-                author="SPOC",
-            )
-            if len(sr) == 0:
-                return {
-                    "tic_id": tic_id,
-                    "status": "skipped",
-                    "reason": "no_spoc_lightcurves",
-                    "n_sectors_seed": seed_sectors,
-                    "retry_count": retry_count,
-                }
+            lcs, sectors = _load_local_lcs(tic_id)
+            n_sectors = len(lcs) if lcs is not None else 0
 
-            sr, sectors = select_best_spoc_products(sr)
-            n_available = len(sr)
-            heartbeat("found_search_products", actual_sectors=sectors, n_available=n_available)
-            if n_available < min_sectors:
-                return {
-                    "tic_id": tic_id,
-                    "status": "skipped",
-                    "reason": f"actual_sectors_below_min ({n_available} < {min_sectors})",
-                    "n_sectors_seed": seed_sectors,
-                    "n_sectors": n_available,
-                    "retry_count": retry_count,
-                }
+            if lcs is None or n_sectors < min_sectors:
+                # Not enough local data — fall back to MAST
+                sr = lk.search_lightcurve(
+                    f"TIC {tic_id}",
+                    mission="TESS",
+                    author="SPOC",
+                )
+                if len(sr) == 0:
+                    return {
+                        "tic_id": tic_id,
+                        "status": "skipped",
+                        "reason": "no_spoc_lightcurves",
+                        "n_sectors_seed": seed_sectors,
+                        "retry_count": retry_count,
+                    }
 
-            heartbeat("downloading", n_available=n_available)
-            lcs = sr.download_all(quality_bitmask="default")
-            if lcs is None or len(lcs) == 0:
-                return {
-                    "tic_id": tic_id,
-                    "status": "error",
-                    "error": "download_all returned no lightcurves",
-                    "n_sectors_seed": seed_sectors,
-                    "retry_count": retry_count,
-                }
+                sr, sectors = select_best_spoc_products(sr)
+                n_available = len(sr)
+                heartbeat("found_search_products", actual_sectors=sectors, n_available=n_available)
+                if n_available < min_sectors:
+                    return {
+                        "tic_id": tic_id,
+                        "status": "skipped",
+                        "reason": f"actual_sectors_below_min ({n_available} < {min_sectors})",
+                        "n_sectors_seed": seed_sectors,
+                        "n_sectors": n_available,
+                        "retry_count": retry_count,
+                    }
 
-            n_sectors = len(lcs)
-            heartbeat("downloaded", n_sectors=n_sectors)
-            if n_sectors < min_sectors:
-                return {
-                    "tic_id": tic_id,
-                    "status": "skipped",
-                    "reason": f"downloaded_sectors_below_min ({n_sectors} < {min_sectors})",
-                    "n_sectors_seed": seed_sectors,
-                    "n_sectors": n_sectors,
-                    "retry_count": retry_count,
-                }
+                heartbeat("downloading", n_available=n_available)
+                lcs = sr.download_all(quality_bitmask="default")
+                if lcs is None or len(lcs) == 0:
+                    return {
+                        "tic_id": tic_id,
+                        "status": "error",
+                        "error": "download_all returned no lightcurves",
+                        "n_sectors_seed": seed_sectors,
+                        "retry_count": retry_count,
+                    }
+
+                n_sectors = len(lcs)
+                heartbeat("downloaded", n_sectors=n_sectors)
+                if n_sectors < min_sectors:
+                    return {
+                        "tic_id": tic_id,
+                        "status": "skipped",
+                        "reason": f"downloaded_sectors_below_min ({n_sectors} < {min_sectors})",
+                        "n_sectors_seed": seed_sectors,
+                        "n_sectors": n_sectors,
+                        "retry_count": retry_count,
+                    }
+            else:
+                heartbeat("found_local", actual_sectors=sectors, n_available=n_sectors)
 
             heartbeat("stitching", n_sectors=n_sectors)
             lc_raw = lcs.stitch() if len(lcs) > 1 else lcs[0]
@@ -999,17 +1032,19 @@ def generate_plots(candidates: list[dict], plot_dir: Path) -> list[Path]:
         tic_id = int(row["tic_id"])
         out_png = plot_dir / f"tic_{tic_id}_deep.png"
         try:
-            sr = lk.search_lightcurve(
-                f"TIC {tic_id}",
-                mission="TESS",
-                author="SPOC",
-            )
-            if len(sr) == 0:
-                continue
-            sr, _ = select_best_spoc_products(sr)
-            lcs = sr.download_all(quality_bitmask="default")
-            if lcs is None or len(lcs) == 0:
-                continue
+            lcs, _ = _load_local_lcs(tic_id)
+            if lcs is None:
+                sr = lk.search_lightcurve(
+                    f"TIC {tic_id}",
+                    mission="TESS",
+                    author="SPOC",
+                )
+                if len(sr) == 0:
+                    continue
+                sr, _ = select_best_spoc_products(sr)
+                lcs = sr.download_all(quality_bitmask="default")
+                if lcs is None or len(lcs) == 0:
+                    continue
             lc_raw = lcs.stitch() if len(lcs) > 1 else lcs[0]
             lc_flat = (
                 lc_raw.normalize()

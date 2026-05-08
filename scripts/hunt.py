@@ -314,7 +314,7 @@ def main():
                 "--csv",       str(bls_csv),
                 "--out-dir",   str(out_dir / "verification"),
                 "--threshold", "9.0",
-                "--workers",   "4",
+                "--workers",   "16",
             ]
             rc_v, _ = run_quiet(verify_cmd,
                                 keep_re=re.compile(r'TIC|verified|✅|❌|verify_batch'))
