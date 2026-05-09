@@ -3373,7 +3373,8 @@ targets and reduce false positives.
             ds_limit = st.number_input("Star limit (0=all)", 0, 50000, 500, 50, key="ds_limit",
                                        help="0 = all qualifying stars from catalog")
         with dc3:
-            ds_workers = st.slider("CPU workers", 1, 32, 4, key="ds_workers")
+            ds_workers = st.slider("Workers", 1, 32, 4, key="ds_workers",
+                                   help="Auto-raised to 32 when GPU BLS is active (BLS RAM freed).")
         dc4, dc5, dc6 = st.columns(3)
         with dc4:
             ds_min_period = st.number_input(
@@ -3395,6 +3396,23 @@ targets and reduce false positives.
                 format_func=lambda x: "Quick first" if x == "quick-first" else "Coverage first",
                 help="Quick first favors cheaper targets so you see completed stars sooner.",
             )
+        _gpu_default = os.environ.get("GPU_BLS_URL", "http://192.168.1.163:9876")
+        ds_gpu_url = st.text_input(
+            "GPU BLS service URL (leave blank to use CPU only)",
+            value=_gpu_default,
+            key="ds_gpu_url",
+            help="Set GPU_BLS_URL to the gpu_bls_service.py host. Workers auto-raise to 32 when active.",
+        )
+        if ds_gpu_url:
+            try:
+                import requests as _req
+                _gr = _req.get(ds_gpu_url.rstrip("/") + "/health", timeout=2)
+                if _gr.ok:
+                    st.success(f"GPU service online — {_gr.json()}")
+                else:
+                    st.warning(f"GPU service returned {_gr.status_code} — will fall back to CPU")
+            except Exception:
+                st.warning("GPU service unreachable — will fall back to CPU BLS")
 
     ds_preview_rows, ds_preview_note = preview_deep_scan_targets(ds_min_sec, int(ds_limit), ds_target_order)
     ds_period_valid = ds_min_period < ds_max_period
@@ -3527,10 +3545,15 @@ targets and reduce false positives.
             ]
             if ds_limit > 0:
                 _ds_cmd += ["--limit", str(ds_limit)]
+            _ds_env = {**os.environ}
+            if ds_gpu_url:
+                _ds_env["GPU_BLS_URL"] = ds_gpu_url.strip()
+            elif "GPU_BLS_URL" in _ds_env:
+                del _ds_env["GPU_BLS_URL"]
             with open(_ds_log, "w") as _lf:
                 _ds_proc = subprocess.Popen(
                     _ds_cmd, stdout=_lf, stderr=subprocess.STDOUT,
-                    cwd=SCRIPTS_DIR, start_new_session=True,
+                    cwd=SCRIPTS_DIR, start_new_session=True, env=_ds_env,
                 )
             write_scan_state({
                 "job_id":      make_job_id("deep_scan"),
