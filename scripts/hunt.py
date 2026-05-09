@@ -426,7 +426,7 @@ def main():
                 log(lf, f"   BLS and verification results are still available below.")
                 log(lf)
             else:
-                n_jobs = max(1, min(4, tic_count))
+                n_jobs = max(1, min(tic_count, args.workers // 4))
                 podman_cmd = [
                     "podman", "run", "--rm",
                     "-v", f"{tics_file}:/tics_tbl.csv:Z",
