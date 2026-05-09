@@ -27,6 +27,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import requests as _requests
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ZENODO_DIR = DATA_DIR / "zenodo"
@@ -36,6 +37,9 @@ SCRIPTS_DIR = Path(__file__).parent
 LABELED_CATALOG = ZENODO_DIR / "exominerplusplus_catalog_labeled_tces.csv"
 UNLABELED_CATALOG = ZENODO_DIR / "exominerplusplus_catalog_unk_tces.csv"
 TARGET_CACHE = DATA_DIR / "deep_scan_targets.json"
+
+# GPU BLS service — opt-in. Set GPU_BLS_URL=http://<host>:9876 to enable.
+_GPU_URL = os.environ.get("GPU_BLS_URL")  # None = CPU-only (default)
 
 # BLS parameters — wider than single-sector scan
 BLS_PERIOD_MIN = 1.0      # days
@@ -761,24 +765,53 @@ def process_deep(task: dict) -> dict:
                     "retry_count": retry_count,
                 }
 
-            durations = np.arange(BLS_DUR_MIN, BLS_DUR_MAX + 1e-9, BLS_DUR_STEP)
-            heartbeat("running_bls", n_points=n_points, n_sectors=n_sectors, total_days=round(total_days, 1))
-            blsm, freq_factor = run_bls(lc_flat, durations, min_period_days, max_period_days)
-            heartbeat(
-                "bls_complete",
-                frequency_factor=freq_factor,
-                n_points=n_points,
-                n_sectors=n_sectors,
-                total_days=round(total_days, 1),
-            )
+            # --- GPU BLS path (opt-in via GPU_BLS_URL) ---
+            _gpu_bls_result = None
+            if _GPU_URL:
+                try:
+                    _resp = _requests.post(
+                        _GPU_URL + "/bls_deep",
+                        json={
+                            "tic_id":     tic_id,
+                            "time":       lc_flat.time.value.tolist(),
+                            "flux":       lc_flat.flux.value.tolist(),
+                            "period_min": min_period_days,
+                            "period_max": max_period_days,
+                            "oversample": 50,
+                        },
+                        timeout=120,
+                    )
+                    if _resp.ok:
+                        _gpu_bls_result = _resp.json()
+                except Exception:
+                    pass  # silent fallback to CPU BLS
+            # -----------------------------------------------
 
-            best_p = float(blsm.period_at_max_power.value)
-            best_t0 = float(blsm.transit_time_at_max_power.value)
-
-            power_arr = np.asarray(blsm.power.value, dtype=float)
-            p_mean = float(np.nanmean(power_arr))
-            p_std = float(np.nanstd(power_arr))
-            sde = (float(blsm.max_power) - p_mean) / p_std if p_std > 0 else 0.0
+            if _gpu_bls_result is not None:
+                heartbeat("bls_complete", frequency_factor=0, n_points=n_points,
+                          n_sectors=n_sectors, total_days=round(total_days, 1))
+                best_p      = float(_gpu_bls_result["period"])
+                best_t0     = float(_gpu_bls_result["t0"])
+                sde         = float(_gpu_bls_result["sde"])
+                freq_factor = 0  # sentinel: GPU used
+            else:
+                durations = np.arange(BLS_DUR_MIN, BLS_DUR_MAX + 1e-9, BLS_DUR_STEP)
+                heartbeat("running_bls", n_points=n_points, n_sectors=n_sectors,
+                          total_days=round(total_days, 1))
+                blsm, freq_factor = run_bls(lc_flat, durations, min_period_days, max_period_days)
+                heartbeat(
+                    "bls_complete",
+                    frequency_factor=freq_factor,
+                    n_points=n_points,
+                    n_sectors=n_sectors,
+                    total_days=round(total_days, 1),
+                )
+                best_p  = float(blsm.period_at_max_power.value)
+                best_t0 = float(blsm.transit_time_at_max_power.value)
+                power_arr = np.asarray(blsm.power.value, dtype=float)
+                p_mean    = float(np.nanmean(power_arr))
+                p_std     = float(np.nanstd(power_arr))
+                sde       = (float(blsm.max_power) - p_mean) / p_std if p_std > 0 else 0.0
 
             if sde < SDE_THRESHOLD:
                 return {
@@ -1466,6 +1499,19 @@ def main():
     )
 
     workers = max(1, min(int(args.workers), os.cpu_count() or DEFAULT_WORKERS))
+
+    _gpu_alive = False
+    if _GPU_URL:
+        try:
+            _r = _requests.get(_GPU_URL + "/health", timeout=3)
+            _gpu_alive = _r.ok
+        except Exception:
+            pass
+        log(f"GPU BLS service: {'online — BLS offloaded to GPU' if _gpu_alive else 'offline — using CPU BLS'}")
+        if _gpu_alive and int(args.workers) <= DEFAULT_WORKERS:
+            workers = min(32, os.cpu_count() or 32)
+            log(f"GPU active: auto-raising workers to {workers} (BLS RAM freed)")
+
     log(f"Using {workers} workers")
     log("Worker/session isolation enabled: each TIC runs in a fresh worker process.")
 
