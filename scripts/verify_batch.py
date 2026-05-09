@@ -2,7 +2,7 @@
 verify_batch.py — Batch multi-sector verification of BLS candidates.
 
 Reads a BLS CSV, verifies candidates with SDE >= threshold using
-ThreadPoolExecutor (I/O-bound MAST downloads), updates CSV in-place with
+ProcessPoolExecutor (CPU-bound: normalize, flatten, phase-fold, plot), updates CSV in-place with
 new columns: n_sectors_checked, n_sectors_consistent, consistency_score,
 verified, eb_warning.
 
@@ -15,7 +15,7 @@ import argparse
 import csv
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent
@@ -111,7 +111,7 @@ def verify_batch(csv_path: str, out_dir: str,
     progress_file = out_dir / "verify_progress.json"
     done = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    with ProcessPoolExecutor(max_workers=max_workers) as ex:
         futures = {
             ex.submit(_verify_one, (row, out_dir)): row
             for row in to_verify
