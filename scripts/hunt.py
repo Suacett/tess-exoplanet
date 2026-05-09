@@ -273,12 +273,16 @@ def main():
                 cands  = prog.get("candidates", 0)
                 rate   = prog.get("rate", 0)
                 pct    = 100 * done // max(total, 1)
-                eta_str = ""
-                if rate > 0 and done < total:
-                    eta_min = (total - done) / rate / 60
-                    eta_str = f" — ETA {eta_min:.0f}m" if eta_min >= 1 else " — ETA <1m"
-                log(lf, f"   🔍 {done:,}/{total:,} stars scanned ({pct}%)"
-                        f" — {cands} signals found — {rate:.1f} stars/sec{eta_str}")
+                status = prog.get("status", "")
+                if status:
+                    log(lf, f"   ⏳ {status} ({done:,}/{total:,})")
+                else:
+                    eta_str = ""
+                    if rate > 0 and done < total:
+                        eta_min = (total - done) / rate / 60
+                        eta_str = f" — ETA {eta_min:.0f}m" if eta_min >= 1 else " — ETA <1m"
+                    log(lf, f"   🔍 {done:,}/{total:,} stars scanned ({pct}%)"
+                            f" — {cands} signals found — {rate:.1f} stars/sec{eta_str}")
         proc.wait()
         elapsed2 = time.time() - t2
         if _prewarm_proc is not None:

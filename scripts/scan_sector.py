@@ -678,44 +678,30 @@ def main():
 
     _gpu_scan_done = False
     if _use_gpu:
-        from concurrent.futures import ThreadPoolExecutor
-        import math as _math
+        # Pipelined GPU scan: mp.Pool loaders (real processes, no GIL) feed GPU
+        # batches as they fill — loading and BLS run concurrently, RAM stays low.
         skipped = 0
-        _preprocessed = []
+        _done   = 0
+        _loaded = 0
+        _cur_batch: list = []
+        _pf = out_dir / "scan_progress.json"
+
         console.print(
-            f"[cyan]Loading {n_total:,} lightcurves ({min(workers, 16)} threads)…[/cyan]"
+            f"[cyan]GPU BLS: streaming {n_total:,} stars "
+            f"({min(workers, 16)} loaders → GPU batches of {_GPU_BATCH})[/cyan]"
         )
-        with ThreadPoolExecutor(max_workers=min(workers, 16)) as _ex:
-            for _r in _ex.map(_load_and_flatten,
-                               [(tid, sector) for tid in tic_ids]):
-                if _r is None:
-                    skipped += 1
-                else:
-                    _preprocessed.append(_r)
-        _star_lut = {r[0]: (r[1], r[2]) for r in _preprocessed}
-        _n_bat = max(1, _math.ceil(len(_preprocessed) / _GPU_BATCH))
-        console.print(
-            f"[cyan]GPU BLS: {len(_preprocessed):,} stars in {_n_bat} batches[/cyan]"
-        )
-        _done = 0
-        _pf   = out_dir / "scan_progress.json"
-        for _b0 in range(0, len(_preprocessed), _GPU_BATCH):
-            _batch   = _preprocessed[_b0:_b0 + _GPU_BATCH]
-            _gpu_res = _gpu_bls_batch(_batch)
-            if _gpu_res is None:
-                # Batch CPU fallback — GPU service unavailable for this batch
-                _cw = [(r[0], sector, args.period_step) for r in _batch]
-                with mp.Pool(processes=min(workers, len(_cw))) as _p:
-                    for _cr in _p.imap_unordered(process_tic, _cw):
-                        if _cr is not None:
-                            all_results.append(_cr)
-                        _done += 1
-            else:
-                for _gr in _gpu_res:
+
+        def _flush_batch(batch, used_gpu):
+            """Send one batch to GPU (or sequential CPU fallback) and record results."""
+            nonlocal _done, skipped
+            _slut = {r[0]: (r[1], r[2]) for r in batch}
+            _gr_list = _gpu_bls_batch(batch)
+            if _gr_list is not None:
+                for _gr in _gr_list:
                     _tid = _gr["tic_id"]
-                    if _tid in _star_lut:
+                    if _tid in _slut:
                         _d = _depth_from_arrays(
-                            *_star_lut[_tid], _gr["period"], _gr["t0"]
+                            *_slut[_tid], _gr["period"], _gr["t0"]
                         )
                         all_results.append({
                             "tic_id":    _tid,
@@ -724,23 +710,72 @@ def main():
                             "bls_power": _gr["sde"],
                             **_d,
                         })
-                _done  += len(_batch)
-                skipped += len(_batch) - len(_gpu_res)
+                _done   += len(batch)
+                skipped += len(batch) - len(_gr_list)
+                return True
+            else:
+                # GPU unavailable — fall back sequentially (avoids nested Pool)
+                for r in batch:
+                    _cr = process_tic((r[0], sector, args.period_step))
+                    if _cr is not None:
+                        all_results.append(_cr)
+                    _done += 1
+                return False
+
+        def _write_progress(status=None):
             _el = time.time() - t0
-            _rt = _done / _el if _el > 0 else 0
-            console.print(
-                f"  GPU batch {_b0 // _GPU_BATCH + 1}/{_n_bat}: "
-                f"{_done + skipped}/{n_total} "
-                f"({'GPU' if _gpu_res else 'CPU fallback'})"
-            )
+            _rt = _done / _el if _el > 0 and _done > 0 else 0
             try:
-                _pf.write_text(json.dumps({
-                    "sector": sector, "done": _done + skipped,
-                    "total": n_total, "candidates": len(all_results),
-                    "rate": round(_rt, 2),
-                }))
+                d = {
+                    "sector": sector, "total": n_total,
+                    "done": _loaded if status else _done + skipped,
+                    "candidates": len(all_results), "rate": round(_rt, 2),
+                }
+                if status:
+                    d["status"] = status
+                _pf.write_text(json.dumps(d))
             except Exception:
                 pass
+
+        with mp.Pool(processes=min(workers, 16)) as _pool:
+            for _r in _pool.imap_unordered(
+                _load_and_flatten, [(tid, sector) for tid in tic_ids]
+            ):
+                _loaded += 1
+                if _r is None:
+                    skipped += 1
+                else:
+                    _cur_batch.append(_r)
+
+                # Progress during loading phase
+                if _loaded % 200 == 0 or _loaded == n_total:
+                    _pct = _loaded * 100 // n_total
+                    console.print(
+                        f"  Loading… {_loaded:,}/{n_total:,} ({_pct}%)",
+                        end="\r",
+                    )
+                    _write_progress(status=f"Loading lightcurves… {_pct}%")
+
+                # Fire GPU batch as soon as we have enough stars
+                if len(_cur_batch) >= _GPU_BATCH:
+                    console.print()
+                    _used = _flush_batch(_cur_batch[:_GPU_BATCH], True)
+                    _cur_batch = _cur_batch[_GPU_BATCH:]
+                    _el = time.time() - t0
+                    _rt = (_done + skipped) / _el if _el > 0 else 0
+                    console.print(
+                        f"  {'GPU' if _used else 'CPU'} batch: "
+                        f"{_done + skipped}/{n_total} done — "
+                        f"{_rt:.1f}/s — {len(all_results)} cands"
+                    )
+                    _write_progress()
+
+            # Final partial batch
+            if _cur_batch:
+                console.print()
+                _flush_batch(_cur_batch, True)
+                _write_progress()
+
         _gpu_scan_done = True
 
     if not _gpu_scan_done:

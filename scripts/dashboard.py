@@ -2889,8 +2889,8 @@ elif page == "Run Scan":
     with st.expander("⚙️ Advanced options"):
         c1, c2 = st.columns(2)
         with c1:
-            workers = st.slider("CPU workers", 1, 32, 16, key="hunt_workers",
-                                help="16 = one per physical core (optimal for BLS)")
+            workers = st.slider("CPU workers", 1, 32, 28, key="hunt_workers",
+                                help="28 workers recommended for this 32-vCPU machine")
         with c2:
             limit = st.number_input("Star limit (0 = all stars)", 0, 100000, 0, 10, key="hunt_limit",
                                     help="Set to e.g. 20 for a quick test run")
